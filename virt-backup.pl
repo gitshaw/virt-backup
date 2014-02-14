@@ -86,10 +86,12 @@
 ### CHANGES
 # * 26/03/2010
 # - Initial packaged version
- 
+
 use XML::Simple;
 use Sys::Virt;
 use Getopt::Long;
+use File::Which;
+use POSIX qw(strftime);
 
 # Set umask
 umask(022);
@@ -99,10 +101,9 @@ umask(022);
 our %opts = ();
 our @vms = ();
 our @excludes = ();
- 
+
 # Sets some defaults values
 $opts{dump} = 1;
-$opts{backupdir} = '/var/lib/libvirt/backup';
 $opts{snapsize} = '5G';
 $opts{state} = 0;
 $opts{debug} = 0;
@@ -123,7 +124,6 @@ GetOptions(
     "keep-lock"    => \$opts{keeplock},
     "state"        => \$opts{state},
     "snapsize=s"   => \$opts{snapsize},
-    "backupdir=s"  => \$opts{backupdir},
     "vm=s"         => \@vms,
     "cleanup"      => \$opts{cleanup},
     "dump"         => \$opts{dump},
@@ -162,6 +162,10 @@ elsif ($opts{compress} eq 'plzip'){
     $opts{compext} = ".lz";
     $opts{compcmd} = "plzip -c";
 }
+elsif ($opts{compress} eq 'pigz'){
+    $opts{compext} = ".gz";
+    $opts{compcmd} = "pigz -c";
+}
 # Default is gzip
 elsif (($opts{compress} eq 'gzip') || ($opts{compress} eq '')) {
     $opts{compext} = ".gz";
@@ -170,6 +174,13 @@ elsif (($opts{compress} eq 'gzip') || ($opts{compress} eq '')) {
 else{
     $opts{compext} = "";
     $opts{compcmd} = "cat";
+}
+
+my $path = which($opts{compress});
+
+if ( not $path ){
+    print  "$opts{compress} is not installed\n";
+    exit 1;
 }
  
 # Allow comma separated multi-argument
@@ -184,12 +195,7 @@ if ((!@vms) || ($opts{help})){
     usage();
     exit 1;
 }
- 
-if (! -d $opts{backupdir} ){
-    print "$opts{backupdir} is not a valid directory\n";
-    exit 1;
-}
- 
+
 # Connect to libvirt
 print "\n\nConnecting to libvirt daemon using $opts{connect} as URI\n" if ($opts{debug});
 our $libvirt = Sys::Virt->new( uri => $opts{connect} ) || 
@@ -205,7 +211,11 @@ foreach our $vm (@vms){
     print "Checking $vm status\n\n" if ($opts{debug});
     our $dom = $libvirt->get_domain_by_name($vm) ||
         die "Error opening $vm object";
-    our $backupdir = $opts{backupdir}.'/'.$vm;
+
+    # Set date for folder creation
+    my $folderdate = strftime "%Y-%m-%d", localtime;
+    our $backupdir = "/backup/$folderdate/$vm";
+
     if ($opts{cleanup}){
         print "Running cleanup routine for $vm, as requested by the --cleanup flag\n\n" if ($opts{debug});
         run_cleanup();
@@ -215,9 +225,16 @@ foreach our $vm (@vms){
         unlock_vm();
     }
     elsif ($opts{dump}){
-        print "Running dump routine for $vm\n\n" if ($opts{debug});
-        mkdir $backupdir || die $!;
-        run_dump();
+
+        if (-d "$backupdir"){
+            print "A snapshot of $vm already exists, moving on...\n\n";
+            next;
+        }
+        else {
+            print "Running dump routine for $vm\n\n" if ($opts{debug});
+            system("/bin/mkdir -p $backupdir" or die $!);
+            run_dump();
+        }
     }
     else {
         usage();
@@ -409,7 +426,7 @@ sub usage{
         "or RAID10)\n\n" .
     "\t--snapsize=<snapsize>: The amount of space to use for snapshots. Use the same format as -L option of lvcreate. " .
         "eg: --snapsize=15G. Default is 5G\n\n" .
-    "\t--compress[=[gzip|bzip2|pbzip2|lzop|xz|lzip|plzip]]: On the fly compress the disks images during the dump. If you " .
+    "\t--compress[=[gzip|bzip2|pbzip2|lzop|xz|lzip|plzip|pigz]]: On the fly compress the disks images during the dump. If you " .
         "don't specify a compression algo, gzip will be used.\n\n" .
     "\t--exclude=hda,hdb: Prevent the disks listed from being dumped. The names are from the VM perspective, as " .
         "configured in livirt as the target element. It can be usefull for example if you want to dump the system " .
